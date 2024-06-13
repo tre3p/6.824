@@ -2,9 +2,9 @@ package mr
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -90,8 +90,6 @@ func (m *Master) GetJob(args *GetJobRequest, response *GetJobResponse) error {
 	m.masterGlobalLock.Lock()
 	defer m.masterGlobalLock.Unlock()
 
-	fmt.Println("Got 'GetJob' request")
-
 	switch m.masterPhase {
 	case MAP_PHASE:
 		handleGetJob(m, response)
@@ -107,12 +105,6 @@ func (m *Master) GetJob(args *GetJobRequest, response *GetJobResponse) error {
 		response.JobType = NO_MORE_JOB
 	}
 
-	if response.JobId != -1 {
-		fmt.Println("Sending job ID " + strconv.Itoa(response.JobId))
-	} else {
-		fmt.Printf("Sending %v job type\n", response.JobType)
-	}
-
 	return nil
 }
 
@@ -120,31 +112,22 @@ func (m *Master) MarkJobDone(args *JobDoneReq, response *JobDoneResp) error {
 	m.masterGlobalLock.Lock()
 	defer m.masterGlobalLock.Unlock()
 
-	fmt.Println("Got 'MarkJobDone' for job " + strconv.Itoa(args.JobId))
-
 	if doneJob, ok := m.JobsInProgress[args.JobId]; ok { // If job doesn't exists - do nothing, probably it has been completed by another worker
 		if doneJob.JobType == MAP {
-			_, jobExists := m.JobsInProgress[args.JobId]
-			if m.masterPhase != MAP_PHASE || m.MapTasksInProgressCount == 0 || !jobExists {
-				fmt.Println("Got stalled MAP job result from worker, ignoring")
+			if m.masterPhase != MAP_PHASE || m.MapTasksInProgressCount == 0 {
 				return nil
 			} // Do not accept stalled job results
 
 			m.MapTasksInProgressCount -= 1
-			fmt.Println(m.MapTasksInProgressCount)
 			delete(m.JobsInProgress, doneJob.JobId)
 			m.IntermediateKeysFiles = append(m.IntermediateKeysFiles, args.JobOutput...)
 
 			if m.MapTasksInProgressCount == 0 && len(m.JobsToBeDone) == 0 {
 				m.masterPhase = REDUCE_PHASE
-				fmt.Println("Master moved to REDUCE phase")
-				// TODO: trigger pulling reduce tasks based on retrieved intermediate keys
+				m.prepareIntermediateKeysForReduceTasks()
 			}
 		} else if doneJob.JobType == REDUCE {
-			_, jobExists := m.JobsInProgress[args.JobId]
-
-			if m.masterPhase != REDUCE_PHASE || m.ReduceTasksInProgressCount == 0 || !jobExists {
-				fmt.Println("Got stalled REDUCE job result from worker, ignoring")
+			if m.masterPhase != REDUCE_PHASE || m.ReduceTasksInProgressCount == 0 {
 				return nil
 			} // Do not accept stalled jobs
 
@@ -153,12 +136,36 @@ func (m *Master) MarkJobDone(args *JobDoneReq, response *JobDoneResp) error {
 			if m.ReduceTasksInProgressCount == 0 && len(m.JobsToBeDone) == 0 {
 				m.DoneFlag = true
 				m.masterPhase = DONE_PHASE
-				fmt.Println("Master moved to DONE phase")
 			}
 		}
 	}
 
 	return nil
+}
+
+func (m *Master) prepareIntermediateKeysForReduceTasks() {
+	result := make(map[int]Job)
+
+	for _, intermediateFile := range m.IntermediateKeysFiles {
+		reduceTaskId, err := strconv.Atoi(strings.Split(intermediateFile, "-")[2])
+		if err != nil {
+			log.Fatalf("Error while parsing file name "+intermediateFile, err)
+		}
+
+		if job, ok := result[reduceTaskId]; ok {
+			job.FileNames = append(job.FileNames, intermediateFile)
+			result[reduceTaskId] = job
+		} else {
+			result[reduceTaskId] = Job{
+				JobId:        reduceTaskId,
+				FileNames:    []string{intermediateFile},
+				JobType:      REDUCE,
+				JobStartTime: time.Now(),
+			}
+		}
+	}
+
+	m.JobsToBeDone = result
 }
 
 func (m *Master) stalledJobsHealthcheck(jobTimeoutSec int) {
@@ -168,7 +175,6 @@ func (m *Master) stalledJobsHealthcheck(jobTimeoutSec int) {
 		for jobId, job := range m.JobsInProgress {
 			jobExpirationTime := job.JobStartTime.Add(time.Second * time.Duration(jobTimeoutSec))
 			if time.Now().After(jobExpirationTime) {
-				fmt.Println("Job with ID " + strconv.Itoa(jobId) + " is stalled, evicting..")
 
 				if job.JobType == MAP {
 					m.MapTasksInProgressCount -= 1

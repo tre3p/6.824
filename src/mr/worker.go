@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -18,6 +19,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -92,7 +101,50 @@ func splitIntermediateKeys(reduceTasksSize int, intermediateKeys []KeyValue) map
 }
 
 func handleReduceJob(filesToReduce []string, jobId int, reducef func(string, []string) string) {
+	var kva []KeyValue
 
+	for _, file := range filesToReduce {
+		f, err := os.Open(file)
+		if err != nil {
+			log.Fatalf("error while opening file "+file, err)
+		}
+
+		decoder := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := decoder.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+	}
+
+	sort.Sort(ByKey(kva))
+	outFileName := "mr-out-" + strconv.Itoa(jobId)
+	outFile, err := os.Create(outFileName)
+	if err != nil {
+		log.Fatalf("Error while creating file "+outFileName, err)
+	}
+
+	i := 0
+	for i < len(kva) {
+		j := i + 1
+		for j < len(kva) && kva[j].Key == kva[i].Key {
+			j++
+		}
+
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+
+		output := reducef(kva[i].Key, values)
+		fmt.Fprintf(outFile, "%v %v\n", kva[i].Key, output)
+
+		i = j
+	}
+
+	CallJobDone(jobId, []string{outFileName}, REDUCE)
 }
 
 // main/mrworker.go calls this function.
@@ -112,7 +164,6 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		case NO_MORE_JOB:
 			return
 		case WAIT:
-			fmt.Println("Got 'WAIT' JobType, waiting...")
 			// Do nothing
 		}
 
@@ -161,6 +212,5 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
 	return false
 }
