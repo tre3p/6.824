@@ -1,29 +1,48 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
-
 import "os"
 import "strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+type JobType int32
 
-type ExampleArgs struct {
-	X int
+const (
+	MAP JobType = iota
+	REDUCE
+	WAIT
+	NO_MORE_JOB
+)
+
+func (jt JobType) String() string {
+	switch jt {
+	case MAP:
+		return "MAP"
+	case REDUCE:
+		return "REDUCE"
+	case WAIT:
+		return "WAIT"
+	case NO_MORE_JOB:
+		return "NO_MORE_JOB"
+	}
+
+	return "UNDEFINED"
 }
 
-type ExampleReply struct {
-	Y int
+type GetJobRequest struct{}
+type GetJobResponse struct {
+	JobId                 int
+	FileNames             []string
+	JobType               JobType
+	ReduceTasksBucketSize int
 }
+
+type JobDoneReq struct {
+	JobId     int
+	JobOutput []string
+	JobType   JobType
+}
+type JobDoneResp struct{}
 
 // Add your RPC definitions here.
-
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
